@@ -112,6 +112,102 @@ export const PRESETS = [
       blur: 0,
       grayscale: 0,
     }
+  },
+  {
+    id: 'teal-orange',
+    name: 'Teal & Orange',
+    category: 'Cinema',
+    description: 'Look cinematográfico: sombras esverdeadas e pele alaranjada',
+    icon: 'Clapperboard',
+    settings: {
+      brightness: 102,
+      contrast: 120,
+      saturate: 132,
+      sepia: 10,
+      hueRotate: 8,
+      blur: 0,
+      grayscale: 0,
+    }
+  },
+  {
+    id: 'moody-dark',
+    name: 'Moody Dark',
+    category: 'Atmosférico',
+    description: 'Sombrio e dramático, com sombras profundas e cores contidas',
+    icon: 'CloudMoon',
+    settings: {
+      brightness: 86,
+      contrast: 122,
+      saturate: 82,
+      sepia: 0,
+      hueRotate: 0,
+      blur: 0,
+      grayscale: 12,
+    }
+  },
+  {
+    id: 'warm-portrait',
+    name: 'Warm Portrait',
+    category: 'Retrato',
+    description: 'Retrato quente e suave, ideal para tons de pele',
+    icon: 'Smile',
+    settings: {
+      brightness: 106,
+      contrast: 98,
+      saturate: 110,
+      sepia: 16,
+      hueRotate: 350,
+      blur: 0.3,
+      grayscale: 0,
+    }
+  },
+  {
+    id: 'desaturated-urban',
+    name: 'Desaturated Urban',
+    category: 'Urbano',
+    description: 'Urbano frio e dessaturado, com um leve toque azulado',
+    icon: 'Building2',
+    settings: {
+      brightness: 98,
+      contrast: 114,
+      saturate: 68,
+      sepia: 0,
+      hueRotate: 205,
+      blur: 0,
+      grayscale: 15,
+    }
+  },
+  {
+    id: 'vivid-landscape',
+    name: 'Vivid Landscape',
+    category: 'Paisagem',
+    description: 'Paisagem vibrante: verdes e azuis intensos com bom contraste',
+    icon: 'Mountain',
+    settings: {
+      brightness: 105,
+      contrast: 116,
+      saturate: 148,
+      sepia: 0,
+      hueRotate: 0,
+      blur: 0,
+      grayscale: 0,
+    }
+  },
+  {
+    id: 'bw-punch',
+    name: 'B&W Punch',
+    category: 'P&B',
+    description: 'Preto e branco de alto impacto, contraste elevado',
+    icon: 'Contrast',
+    settings: {
+      brightness: 100,
+      contrast: 150,
+      saturate: 0,
+      sepia: 0,
+      hueRotate: 0,
+      blur: 0,
+      grayscale: 100,
+    }
   }
 ];
 

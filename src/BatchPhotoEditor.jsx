@@ -28,6 +28,10 @@ import {
   Moon,
   Star,
   Save,
+  Clapperboard,
+  CloudMoon,
+  Building2,
+  Mountain,
 } from "lucide-react";
 import { PRESETS, getCanvasFilterString } from "./presets";
 import { fetchPresets, savePreset, deletePreset } from "./presetsStore";
@@ -51,6 +55,11 @@ const ICON_MAP = {
   Film,
   Aperture,
   Star,
+  Contrast,
+  Clapperboard,
+  CloudMoon,
+  Building2,
+  Mountain,
 };
 
 // Estado neutro = settings do preset "original".
@@ -235,6 +244,8 @@ export default function BatchPhotoEditor() {
   const [customPresets, setCustomPresets] = useState([]);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [newPresetName, setNewPresetName] = useState("");
+  const [favoritePresetIds, setFavoritePresetIds] = useState([]);
+  const [presetFilter, setPresetFilter] = useState("all"); // all | mine | favorites
   const [showBefore, setShowBefore] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [processing, setProcessing] = useState(false);
@@ -324,6 +335,28 @@ export default function BatchPhotoEditor() {
   useEffect(() => {
     fetchPresets().then(setCustomPresets).catch(() => {});
   }, []);
+
+  // Favoritos: carrega uma vez e persiste no localStorage a cada mudança.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("bps-favorite-presets");
+      if (raw) setFavoritePresetIds(JSON.parse(raw));
+    } catch {
+      /* storage indisponível */
+    }
+  }, []);
+
+  const toggleFavorite = (id) => {
+    setFavoritePresetIds((prev) => {
+      const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+      try {
+        localStorage.setItem("bps-favorite-presets", JSON.stringify(next));
+      } catch {
+        /* modo privado / cota cheia */
+      }
+      return next;
+    });
+  };
 
   const saveCurrentPreset = () => {
     const name = newPresetName.trim();
@@ -653,47 +686,113 @@ export default function BatchPhotoEditor() {
 
           {/* Presets */}
           <div className="rounded-xl bg-slate-900/40 border border-slate-800 p-4">
-            <span className="text-sm font-semibold flex items-center gap-2 mb-3">
-              <Sparkles size={15} className="text-emerald-400" /> Presets de cor
-            </span>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-              {[...PRESETS, ...customPresets].map((p) => {
-                const Icon = ICON_MAP[p.icon] || Sparkles;
-                const active = activePreset === p.id;
-                return (
-                  <div
-                    key={p.id}
-                    onClick={() => applyPreset(p)}
-                    title={p.description}
-                    className={`relative group flex flex-col gap-1 px-3 py-2.5 rounded-lg text-left transition border cursor-pointer ${
-                      active
-                        ? "bg-emerald-500/15 border-emerald-500 text-emerald-300"
-                        : "bg-slate-800/50 border-slate-700/50 hover:border-slate-600 text-slate-300"
+            <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+              <span className="text-sm font-semibold flex items-center gap-2">
+                <Sparkles size={15} className="text-emerald-400" /> Presets de cor
+              </span>
+              <div className="flex items-center gap-0.5 rounded-lg bg-slate-800/60 p-0.5">
+                {[
+                  { id: "all", label: "Todos" },
+                  { id: "mine", label: "Meus" },
+                  { id: "favorites", label: "Favoritos", star: true },
+                ].map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={() => setPresetFilter(f.id)}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition ${
+                      presetFilter === f.id
+                        ? "bg-emerald-500 text-slate-950"
+                        : "text-slate-400 hover:text-slate-200"
                     }`}
                   >
-                    <span className="flex items-center gap-2 pr-4">
-                      <Icon size={15} className="shrink-0" />
-                      <span className="text-xs font-semibold leading-tight">{p.name}</span>
-                    </span>
-                    <span className="text-[10px] uppercase tracking-wide text-slate-500">
-                      {p.category}
-                    </span>
-                    {p.custom && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteCustomPreset(p.id);
-                        }}
-                        title="Excluir preset"
-                        className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-slate-950/70 grid place-items-center opacity-0 group-hover:opacity-100 transition hover:bg-red-500"
-                      >
-                        <X size={11} />
-                      </button>
+                    {f.label}
+                    {f.star && (
+                      <Star
+                        size={11}
+                        fill="currentColor"
+                        className={presetFilter === f.id ? "" : "text-amber-400"}
+                      />
                     )}
-                  </div>
-                );
-              })}
+                  </button>
+                ))}
+              </div>
             </div>
+
+            {(() => {
+              const visible = [...PRESETS, ...customPresets].filter((p) =>
+                presetFilter === "mine"
+                  ? p.custom
+                  : presetFilter === "favorites"
+                  ? favoritePresetIds.includes(p.id)
+                  : true
+              );
+              if (!visible.length) {
+                return (
+                  <p className="text-xs text-slate-600 text-center py-6">
+                    {presetFilter === "favorites"
+                      ? "Nenhum favorito ainda — toque na ⭐ de um preset."
+                      : "Nenhum preset seu ainda."}
+                  </p>
+                );
+              }
+              return (
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {visible.map((p) => {
+                    const Icon = ICON_MAP[p.icon] || Sparkles;
+                    const active = activePreset === p.id;
+                    const isFav = favoritePresetIds.includes(p.id);
+                    return (
+                      <div
+                        key={p.id}
+                        onClick={() => applyPreset(p)}
+                        title={p.description}
+                        className={`relative group flex flex-col gap-1 px-3 py-2.5 rounded-lg text-left transition border cursor-pointer ${
+                          active
+                            ? "bg-emerald-500/15 border-emerald-500 text-emerald-300"
+                            : "bg-slate-800/50 border-slate-700/50 hover:border-slate-600 text-slate-300"
+                        }`}
+                      >
+                        <span className="flex items-center gap-2 pr-9">
+                          <Icon size={15} className="shrink-0" />
+                          <span className="text-xs font-semibold leading-tight">{p.name}</span>
+                        </span>
+                        <span className="text-[10px] uppercase tracking-wide text-slate-500">
+                          {p.category}
+                        </span>
+                        <div className="absolute top-1.5 right-1.5 flex items-center gap-1">
+                          {p.custom && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteCustomPreset(p.id);
+                              }}
+                              title="Excluir preset"
+                              className="w-5 h-5 rounded-full bg-slate-950/70 grid place-items-center opacity-0 group-hover:opacity-100 transition hover:bg-red-500"
+                            >
+                              <X size={11} />
+                            </button>
+                          )}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleFavorite(p.id);
+                            }}
+                            title={isFav ? "Remover dos favoritos" : "Adicionar aos favoritos"}
+                            className={`w-5 h-5 rounded-full grid place-items-center transition ${
+                              isFav
+                                ? "opacity-100 text-amber-400"
+                                : "opacity-0 group-hover:opacity-100 text-slate-400 hover:text-amber-300"
+                            }`}
+                          >
+                            <Star size={12} fill={isFav ? "currentColor" : "none"} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
         </main>
 
