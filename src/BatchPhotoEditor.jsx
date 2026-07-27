@@ -396,7 +396,9 @@ export default function BatchPhotoEditor() {
               <Sparkles size={18} className="text-slate-950" />
             </div>
             <div>
-              <h1 className="font-bold text-lg leading-none">Batch Photo Studio</h1>
+              <h1 className="font-bold text-lg leading-none uppercase tracking-wider">
+                Editor em Massa
+              </h1>
               <p className="text-xs text-slate-400">Edição de fotos em massa · 100% no navegador</p>
             </div>
           </div>
