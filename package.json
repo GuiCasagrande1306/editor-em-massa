@@ -4,11 +4,17 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "copy:ffmpeg": "node scripts/copy-ffmpeg-core.mjs",
+    "predev": "npm run copy:ffmpeg",
     "dev": "vite",
+    "prebuild": "npm run copy:ffmpeg",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@ffmpeg/core": "^0.12.6",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
     "@supabase/supabase-js": "^2.110.8",
     "jszip": "^3.10.1",
     "lucide-react": "^0.469.0",

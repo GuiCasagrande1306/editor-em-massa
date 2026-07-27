@@ -5,6 +5,9 @@ node_modules
 dist
 dist-ssr
 
+# Core do FFmpeg copiado no dev/build (regenerado por scripts/copy-ffmpeg-core.mjs)
+public/ffmpeg
+
 # Ambiente (segredos) — NUNCA commitar
 .env
 .env.local

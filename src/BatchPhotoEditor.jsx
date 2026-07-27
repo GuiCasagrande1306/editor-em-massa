@@ -82,17 +82,12 @@ const OUTPUT_FORMATS = [
 ];
 
 // Carrega JSZip sob demanda.
+// Carrega o JSZip do pacote bundlado (import dinâmico = code-splitting sob demanda).
+// Antes vinha por <script> de CDN, mas o COEP require-corp (necessário pro FFmpeg)
+// bloqueia recursos cross-origin — então importamos localmente.
 let jszipPromise = null;
 function loadJSZip() {
-  if (window.JSZip) return Promise.resolve(window.JSZip);
-  if (jszipPromise) return jszipPromise;
-  jszipPromise = new Promise((resolve, reject) => {
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
-    s.onload = () => resolve(window.JSZip);
-    s.onerror = () => reject(new Error("Falha ao carregar JSZip"));
-    document.head.appendChild(s);
-  });
+  if (!jszipPromise) jszipPromise = import("jszip").then((m) => m.default);
   return jszipPromise;
 }
 
@@ -389,7 +384,7 @@ export default function BatchPhotoEditor() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
-      <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur sticky top-0 z-20">
+      <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur sticky top-12 z-20">
         <div className="max-w-[1600px] mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-emerald-400 to-teal-600 grid place-items-center">

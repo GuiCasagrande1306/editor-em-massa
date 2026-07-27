@@ -8,4 +8,8 @@ export default defineConfig({
     port: 5190,
     host: true,
   },
+  // Evita que o esbuild pré-empacote o FFmpeg (o worker interno quebra se otimizado).
+  optimizeDeps: {
+    exclude: ["@ffmpeg/ffmpeg", "@ffmpeg/util"],
+  },
 });
