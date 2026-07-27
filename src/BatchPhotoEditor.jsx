@@ -410,22 +410,6 @@ export default function BatchPhotoEditor() {
 
     const zipName = `fotos-editadas-${Date.now()}.zip`;
 
-    // Se o navegador suportar a File System Access API, abrimos o destino no
-    // disco JÁ (dentro do gesto do clique) para depois gravar o ZIP em stream,
-    // com memória constante — não segura o arquivo inteiro na RAM.
-    let fileHandle = null;
-    if (typeof window.showSaveFilePicker === "function") {
-      try {
-        fileHandle = await window.showSaveFilePicker({
-          suggestedName: zipName,
-          types: [{ description: "Arquivo ZIP", accept: { "application/zip": [".zip"] } }],
-        });
-      } catch (err) {
-        if (err?.name === "AbortError") return; // usuário cancelou o salvar
-        fileHandle = null; // qualquer outro erro: cai no fallback em memória
-      }
-    }
-
     setProcessing(true);
     setProgress(0);
     setProgressPhase(`Aplicando filtros (0/${images.length})`);
@@ -468,30 +452,23 @@ export default function BatchPhotoEditor() {
       canvas.width = 0;
       canvas.height = 0;
 
-      setProgressPhase(fileHandle ? "Gravando ZIP no disco…" : "Montando ZIP…");
+      setProgressPhase("Montando ZIP…");
       const onProgress = (pct) =>
         setProgress(RENDER_WEIGHT + Math.round((pct / 100) * (100 - RENDER_WEIGHT)));
 
-      if (fileHandle) {
-        // Streaming direto para o disco: cada chunk vai para o arquivo.
-        const writable = await fileHandle.createWritable();
-        try {
-          await streamZip(zip, (chunk) => writable.write(chunk), onProgress);
-        } finally {
-          await writable.close();
-        }
-      } else {
-        // Fallback: monta um Blob a partir dos chunks (sem o buffer duplo do
-        // generateAsync) e dispara o download tradicional.
-        const chunks = [];
-        await streamZip(zip, (chunk) => chunks.push(chunk), onProgress);
-        const content = new Blob(chunks, { type: "application/zip" });
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(content);
-        link.download = zipName;
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-      }
+      // Monta o ZIP a partir dos chunks (streaming — sem o buffer duplo do
+      // generateAsync) e dispara o download universal por link. Funciona em
+      // todos os navegadores e não abre diálogo nativo de "salvar como".
+      const chunks = [];
+      await streamZip(zip, (chunk) => chunks.push(chunk), onProgress);
+      const content = new Blob(chunks, { type: "application/zip" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(content);
+      link.download = zipName;
+      document.body.appendChild(link); // Firefox exige o link no DOM
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(link.href), 2000);
 
       setProgress(100);
       setProgressPhase("Concluído!");
