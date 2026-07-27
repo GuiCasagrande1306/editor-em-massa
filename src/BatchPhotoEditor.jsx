@@ -197,6 +197,36 @@ function renderToCanvas(img, settings, resize, watermark, target) {
   return canvas;
 }
 
+// Largura máx. do canvas de PRÉ-VISUALIZAÇÃO (só exibição). A exportação usa a
+// resolução nativa — isto evita redesenhar 5328×4000 a cada ajuste de slider.
+const PREVIEW_MAX_W = 1200;
+
+// Slider fora do componente: se ficasse inline, o React o trataria como um tipo
+// novo a cada render e REMONTARIA os 7 sliders a cada movimento (INP alto).
+const SliderControl = ({ icon: Icon, label, value, min, max, step = 1, unit = "", onChange }) => (
+  <div className="mb-4">
+    <div className="flex items-center justify-between mb-1.5">
+      <span className="flex items-center gap-2 text-sm text-slate-300">
+        <Icon size={15} className="text-emerald-400" />
+        {label}
+      </span>
+      <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-emerald-300">
+        {value}
+        {unit}
+      </span>
+    </div>
+    <input
+      type="range"
+      min={min}
+      max={max}
+      step={step}
+      value={value}
+      onChange={(e) => onChange(Number(e.target.value))}
+      className="w-full h-1.5 rounded-full appearance-none bg-slate-700 accent-emerald-500 cursor-pointer"
+    />
+  </div>
+);
+
 export default function BatchPhotoEditor() {
   const [images, setImages] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -221,6 +251,15 @@ export default function BatchPhotoEditor() {
     opacity: 80,
   });
   const [output, setOutput] = useState({ format: "image/jpeg", quality: 90 });
+
+  // O preview usa uma versão "atrasada" dos ajustes: enquanto o usuário arrasta
+  // um slider, `settings` muda a cada pixel, mas o Canvas só é redesenhado ~80ms
+  // após a última mudança (debounce), eliminando o gargalo de INP.
+  const [debouncedSettings, setDebouncedSettings] = useState(settings);
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedSettings(settings), 80);
+    return () => clearTimeout(id);
+  }, [settings]);
 
   const fileInputRef = useRef(null);
   const previewCanvasRef = useRef(null);
@@ -313,22 +352,20 @@ export default function BatchPhotoEditor() {
   };
 
   // ---------------- Preview render ----------------
+  // Renderiza DIRETO no canvas do ref, em resolução reduzida (máx 1200px, só
+  // para exibição) e a partir dos ajustes com debounce. A exportação continua
+  // usando a resolução nativa — o preview reduzido é puramente visual.
   useEffect(() => {
     if (!selectedImage || !previewCanvasRef.current) return;
-    const canvas = previewCanvasRef.current;
-    const activeSettings = showBefore ? DEFAULT_SETTINGS : settings;
-    const rendered = renderToCanvas(
+    const activeSettings = showBefore ? DEFAULT_SETTINGS : debouncedSettings;
+    renderToCanvas(
       selectedImage.imgEl,
       activeSettings,
-      resize,
-      showBefore ? { ...watermark, enabled: false } : watermark
+      { enabled: true, maxWidth: PREVIEW_MAX_W, maxHeight: PREVIEW_MAX_W },
+      showBefore ? { ...watermark, enabled: false } : watermark,
+      previewCanvasRef.current
     );
-    canvas.width = rendered.width;
-    canvas.height = rendered.height;
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(rendered, 0, 0);
-  }, [selectedImage, settings, showBefore, resize, watermark]);
+  }, [selectedImage, debouncedSettings, showBefore, watermark]);
 
   // ---------------- Exportação ----------------
   // Fase 1 (renderizar os filtros/resize de cada imagem) ocupa 0–85% da barra;
@@ -448,30 +485,6 @@ export default function BatchPhotoEditor() {
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   };
-
-  const SliderControl = ({ icon: Icon, label, value, min, max, step = 1, unit = "", onChange }) => (
-    <div className="mb-4">
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="flex items-center gap-2 text-sm text-slate-300">
-          <Icon size={15} className="text-emerald-400" />
-          {label}
-        </span>
-        <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-800 text-emerald-300">
-          {value}
-          {unit}
-        </span>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full h-1.5 rounded-full appearance-none bg-slate-700 accent-emerald-500 cursor-pointer"
-      />
-    </div>
-  );
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
