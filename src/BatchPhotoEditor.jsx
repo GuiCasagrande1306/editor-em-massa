@@ -104,13 +104,24 @@ function streamZip(zip, onChunk, onProgress) {
       streamFiles: true,
       compression: "STORE",
     });
+    let lastYield = performance.now();
     stream
       .on("data", (chunk, meta) => {
         stream.pause(); // segura o fluxo até o chunk atual ser consumido
         Promise.resolve(onChunk(chunk))
           .then(() => {
             if (onProgress) onProgress(meta.percent);
-            stream.resume();
+            // Retomar via .then() (microtask) NÃO deixa o navegador pintar, o
+            // que congela a UI durante a compactação. A cada ~30ms cedemos um
+            // macrotask (setTimeout 0) para o browser repintar a barra (~30fps);
+            // nos chunks intermediários retomamos direto para não perder throughput.
+            const now = performance.now();
+            if (now - lastYield > 30) {
+              lastYield = now;
+              setTimeout(() => stream.resume(), 0);
+            } else {
+              stream.resume();
+            }
           })
           .catch(reject);
       })
