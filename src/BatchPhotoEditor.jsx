@@ -91,8 +91,39 @@ function loadJSZip() {
   return jszipPromise;
 }
 
+// Gera o ZIP em stream, entregando um chunk por vez (com backpressure) em vez
+// de materializar o arquivo inteiro na RAM. `compression: "STORE"` = sem
+// recompressão: as fotos já saem comprimidas do toBlob, então o DEFLATE só
+// gastaria CPU/RAM sem reduzir tamanho.
+// `onChunk(chunk)` pode ser async (ex.: escrever no disco); `onProgress(pct)`
+// recebe 0..100. Resolve quando o stream termina.
+function streamZip(zip, onChunk, onProgress) {
+  return new Promise((resolve, reject) => {
+    const stream = zip.generateInternalStream({
+      type: "uint8array",
+      streamFiles: true,
+      compression: "STORE",
+    });
+    stream
+      .on("data", (chunk, meta) => {
+        stream.pause(); // segura o fluxo até o chunk atual ser consumido
+        Promise.resolve(onChunk(chunk))
+          .then(() => {
+            if (onProgress) onProgress(meta.percent);
+            stream.resume();
+          })
+          .catch(reject);
+      })
+      .on("error", reject)
+      .on("end", resolve);
+    stream.resume();
+  });
+}
+
 // Desenha uma imagem num canvas aplicando settings, resize e marca d'água.
-function renderToCanvas(img, settings, resize, watermark) {
+// `target` permite reutilizar o MESMO canvas em toda a exportação em lote
+// (economia de RAM); sem ele, cria um canvas novo (usado no preview/single).
+function renderToCanvas(img, settings, resize, watermark, target) {
   let w = img.naturalWidth;
   let h = img.naturalHeight;
 
@@ -104,7 +135,8 @@ function renderToCanvas(img, settings, resize, watermark) {
     h = Math.round(h * ratio);
   }
 
-  const canvas = document.createElement("canvas");
+  const canvas = target || document.createElement("canvas");
+  // Reatribuir width/height também limpa o canvas reutilizado.
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext("2d");
@@ -294,6 +326,25 @@ export default function BatchPhotoEditor() {
 
   const processAndDownload = async () => {
     if (!images.length) return;
+
+    const zipName = `fotos-editadas-${Date.now()}.zip`;
+
+    // Se o navegador suportar a File System Access API, abrimos o destino no
+    // disco JÁ (dentro do gesto do clique) para depois gravar o ZIP em stream,
+    // com memória constante — não segura o arquivo inteiro na RAM.
+    let fileHandle = null;
+    if (typeof window.showSaveFilePicker === "function") {
+      try {
+        fileHandle = await window.showSaveFilePicker({
+          suggestedName: zipName,
+          types: [{ description: "Arquivo ZIP", accept: { "application/zip": [".zip"] } }],
+        });
+      } catch (err) {
+        if (err?.name === "AbortError") return; // usuário cancelou o salvar
+        fileHandle = null; // qualquer outro erro: cai no fallback em memória
+      }
+    }
+
     setProcessing(true);
     setProgress(0);
     setProgressPhase(`Aplicando filtros (0/${images.length})`);
@@ -301,39 +352,68 @@ export default function BatchPhotoEditor() {
       const JSZip = await loadJSZip();
       const zip = new JSZip();
       const fmt = OUTPUT_FORMATS.find((f) => f.id === output.format);
+      // Qualidade selecionada (100% => 1.0). PNG é lossless (ignora quality).
       const quality = fmt.supportsQuality ? output.quality / 100 : undefined;
+
+      // UM único canvas reutilizado por todas as imagens (economia de RAM).
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
 
       for (let i = 0; i < images.length; i++) {
         const image = images[i];
-        const canvas = renderToCanvas(image.imgEl, settings, resize, watermark);
+        // Renderiza na resolução NATIVA (resize só entra se o usuário ativou).
+        renderToCanvas(image.imgEl, settings, resize, watermark, canvas);
         // eslint-disable-next-line no-await-in-loop
-        const blob = await new Promise((resolve) =>
+        let blob = await new Promise((resolve) =>
           canvas.toBlob(resolve, output.format, quality)
         );
         const base = image.name.replace(/\.[^.]+$/, "");
         zip.file(`${base}-editado.${fmt.ext}`, blob);
+        blob = null; // solta a referência para o GC
+
+        // Limpa o canvas antes da próxima imagem.
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
         const done = i + 1;
         setProgress(Math.round((done / images.length) * RENDER_WEIGHT));
         setProgressPhase(`Aplicando filtros (${done}/${images.length})`);
-        // cede o thread pro React pintar a barra entre as imagens.
-        // setTimeout (não rAF) para não travar quando a aba está em background.
+        // Respiro para o GC a cada 10 imagens (20ms); nas demais, só cede o
+        // thread (0ms) para o React repintar a barra.
         // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => setTimeout(r, 0));
+        await new Promise((r) => setTimeout(r, done % 10 === 0 ? 20 : 0));
       }
 
-      setProgressPhase("Compactando ZIP…");
-      const content = await zip.generateAsync({ type: "blob" }, (meta) => {
-        // meta.percent: 0..100 da compactação -> mapeia para 85..100
-        setProgress(RENDER_WEIGHT + Math.round((meta.percent / 100) * (100 - RENDER_WEIGHT)));
-      });
+      // Encolhe o canvas para liberar o buffer da última imagem.
+      canvas.width = 0;
+      canvas.height = 0;
+
+      setProgressPhase(fileHandle ? "Gravando ZIP no disco…" : "Montando ZIP…");
+      const onProgress = (pct) =>
+        setProgress(RENDER_WEIGHT + Math.round((pct / 100) * (100 - RENDER_WEIGHT)));
+
+      if (fileHandle) {
+        // Streaming direto para o disco: cada chunk vai para o arquivo.
+        const writable = await fileHandle.createWritable();
+        try {
+          await streamZip(zip, (chunk) => writable.write(chunk), onProgress);
+        } finally {
+          await writable.close();
+        }
+      } else {
+        // Fallback: monta um Blob a partir dos chunks (sem o buffer duplo do
+        // generateAsync) e dispara o download tradicional.
+        const chunks = [];
+        await streamZip(zip, (chunk) => chunks.push(chunk), onProgress);
+        const content = new Blob(chunks, { type: "application/zip" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(content);
+        link.download = zipName;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+      }
 
       setProgress(100);
       setProgressPhase("Concluído!");
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(content);
-      link.download = `fotos-editadas-${Date.now()}.zip`;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
     } catch (err) {
       // eslint-disable-next-line no-alert
       alert("Erro ao processar: " + err.message);
