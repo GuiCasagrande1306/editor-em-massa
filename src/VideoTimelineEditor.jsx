@@ -16,6 +16,7 @@ import {
   Layers,
   Film,
 } from "lucide-react";
+import { extractAudioFromVideo } from "./extractAudio";
 
 // ---------------------------------------------------------------------------
 // Editor de Vídeos Interativo (timeline) — MVP profissional
@@ -220,10 +221,23 @@ export default function VideoTimelineEditor() {
   const transcribe = async () => {
     if (!video?.file || transcribing) return;
     setTranscribing(true);
-    setTranscribeMsg("Transcrevendo (IA)…");
+    // 1) extrai só o áudio (WAV 16kHz mono) — evita o limite de 4MB da Vercel.
+    let audioBlob = null;
+    let filename = video.name;
+    setTranscribeMsg("Extraindo áudio do vídeo…");
     try {
+      audioBlob = await extractAudioFromVideo(video.file);
+      filename = video.name.replace(/\.[^.]+$/, "") + ".wav";
+    } catch {
+      // fallback seguro: envia o vídeo original (pode dar 413 se for grande)
+      audioBlob = video.file;
+      setTranscribeMsg("Não extraí o áudio; enviando o vídeo original…");
+    }
+    try {
+      const mb = (audioBlob.size / 1e6).toFixed(1);
+      setTranscribeMsg(`Enviando para transcrição (${mb} MB)…`);
       const fd = new FormData();
-      fd.append("file", video.file, video.name);
+      fd.append("file", audioBlob, filename);
       const res = await fetch("/api/transcribe", { method: "POST", body: fd });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
