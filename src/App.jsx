@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { ImageIcon, Film, Clapperboard } from "lucide-react";
+import { ImageIcon, Film, Clapperboard, Layers } from "lucide-react";
 import BatchPhotoEditor from "./BatchPhotoEditor.jsx";
 import BatchVideoEditor from "./BatchVideoEditor.jsx";
 import VideoTimelineEditor from "./VideoTimelineEditor.jsx";
+import BatchVideoPipeline from "./BatchVideoPipeline.jsx";
 
 export default function App() {
   const [tab, setTab] = useState("photos");
@@ -10,10 +11,12 @@ export default function App() {
   // ~32MB para quem usa só fotos). Depois de montados, ficam com display:none.
   const [videoMounted, setVideoMounted] = useState(false);
   const [timelineMounted, setTimelineMounted] = useState(false);
+  const [batchMounted, setBatchMounted] = useState(false);
 
   const openTab = (id) => {
     if (id === "videos") setVideoMounted(true);
     if (id === "timeline") setTimelineMounted(true);
+    if (id === "batch") setBatchMounted(true);
     setTab(id);
   };
 
@@ -45,6 +48,9 @@ export default function App() {
         <TabButton id="timeline" icon={Clapperboard}>
           Editor Timeline
         </TabButton>
+        <TabButton id="batch" icon={Layers}>
+          Batch Pipeline
+        </TabButton>
       </nav>
 
       <div style={{ display: tab === "photos" ? "block" : "none" }}>
@@ -58,6 +64,11 @@ export default function App() {
       {timelineMounted && (
         <div style={{ display: tab === "timeline" ? "block" : "none" }}>
           <VideoTimelineEditor />
+        </div>
+      )}
+      {batchMounted && (
+        <div style={{ display: tab === "batch" ? "block" : "none" }}>
+          <BatchVideoPipeline />
         </div>
       )}
     </div>
