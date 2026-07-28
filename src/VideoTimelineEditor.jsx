@@ -70,6 +70,8 @@ export default function VideoTimelineEditor() {
 
   const [panel, setPanel] = useState("subs"); // subs | gifs
   const [sentence, setSentence] = useState("");
+  const [transcribing, setTranscribing] = useState(false);
+  const [transcribeMsg, setTranscribeMsg] = useState("");
   const [gifQuery, setGifQuery] = useState("");
   const [gifResults, setGifResults] = useState([]);
   const [gifUrl, setGifUrl] = useState("");
@@ -211,6 +213,38 @@ export default function VideoTimelineEditor() {
     }));
     setWords((prev) => [...prev, ...next].sort((a, b) => a.start - b.start));
     setSentence("");
+  };
+
+  // Transcrição automática (IA): envia o vídeo para /api/transcribe (Whisper na
+  // Groq) e popula a faixa de legendas com timestamps por palavra.
+  const transcribe = async () => {
+    if (!video?.file || transcribing) return;
+    setTranscribing(true);
+    setTranscribeMsg("Transcrevendo (IA)…");
+    try {
+      const fd = new FormData();
+      fd.append("file", video.file, video.name);
+      const res = await fetch("/api/transcribe", { method: "POST", body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setTranscribeMsg(data.message || data.error || `Falha (${res.status})`);
+        return;
+      }
+      const ws = (data.words || [])
+        .filter((w) => w.word && isFinite(w.start) && isFinite(w.end))
+        .map((w) => ({ id: uid(), text: String(w.word).trim(), start: +w.start, end: +w.end }))
+        .sort((a, b) => a.start - b.start);
+      if (!ws.length) {
+        setTranscribeMsg("Nenhuma palavra retornada.");
+        return;
+      }
+      setWords(ws);
+      setTranscribeMsg(`${ws.length} palavras transcritas ✓`);
+    } catch {
+      setTranscribeMsg("Sem resposta do /api (em dev local as funções não rodam — teste na Vercel).");
+    } finally {
+      setTranscribing(false);
+    }
   };
 
   // ------------------------------------------------------ GIFs / overlays
@@ -628,9 +662,16 @@ export default function VideoTimelineEditor() {
                     <Plus size={13} /> palavra
                   </button>
                 </div>
+                <button
+                  onClick={transcribe}
+                  disabled={transcribing}
+                  className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 disabled:opacity-50 text-emerald-300 text-xs font-medium transition"
+                >
+                  <Wand2 size={13} /> {transcribing ? "Transcrevendo…" : "Transcrever com IA (Whisper)"}
+                </button>
+                {transcribeMsg && <p className="text-[10px] text-slate-400">{transcribeMsg}</p>}
                 <p className="text-[10px] text-slate-500">
-                  🔌 Transcrição automática (Whisper/Groq) pluga aqui: o endpoint retorna palavras com
-                  start/end em ms e popula esta faixa.
+                  Usa o endpoint /api/transcribe (Whisper na Groq). Precisa de GROQ_API_KEY na Vercel.
                 </p>
               </div>
 
