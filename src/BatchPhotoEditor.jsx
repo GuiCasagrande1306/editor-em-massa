@@ -236,6 +236,31 @@ const SliderControl = ({ icon: Icon, label, value, min, max, step = 1, unit = ""
   </div>
 );
 
+// Miniatura da galeria memoizada: só re-renderiza se ESTA imagem mudar ou
+// se sua seleção mudar — não a cada render do componente pai (salvar preset,
+// arrastar slider, etc.). Requer callbacks estáveis (useCallback) no pai.
+const GalleryThumb = React.memo(function GalleryThumb({ img, isSelected, onSelect, onRemove }) {
+  return (
+    <div
+      onClick={() => onSelect(img.id)}
+      className={`relative group aspect-square rounded-lg overflow-hidden cursor-pointer border-2 transition ${
+        isSelected ? "border-emerald-400" : "border-transparent hover:border-slate-600"
+      }`}
+    >
+      <img src={img.url} alt={img.name} className="w-full h-full object-cover" />
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove(img.id);
+        }}
+        className="absolute top-1 right-1 w-5 h-5 rounded-full bg-slate-950/80 grid place-items-center opacity-0 group-hover:opacity-100 transition hover:bg-red-500"
+      >
+        <X size={11} />
+      </button>
+    </div>
+  );
+});
+
 export default function BatchPhotoEditor() {
   const [images, setImages] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -307,13 +332,17 @@ export default function BatchPhotoEditor() {
     if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
   };
 
-  const removeImage = (id) => {
+  // Callbacks estáveis (useCallback) para o React.memo das miniaturas funcionar:
+  // salvar um preset, mexer nos sliders, etc. não re-renderiza a galeria toda.
+  const removeImage = useCallback((id) => {
     setImages((prev) => {
       const target = prev.find((i) => i.id === id);
       if (target) URL.revokeObjectURL(target.url);
       return prev.filter((i) => i.id !== id);
     });
-  };
+  }, []);
+
+  const handleSelectImage = useCallback((id) => setSelectedId(id), []);
 
   const clearAll = () => {
     images.forEach((i) => URL.revokeObjectURL(i.url));
@@ -414,6 +443,10 @@ export default function BatchPhotoEditor() {
     setProgress(0);
     setProgressPhase(`Aplicando filtros (0/${images.length})`);
     try {
+      // Cede o thread para o navegador PINTAR o estado "Processando…" (spinner +
+      // botão desabilitado + barra) ANTES do trabalho pesado. É o que derruba o
+      // INP: sem isso, o primeiro paint só ocorre depois do 1º toBlob pesado.
+      await new Promise((r) => setTimeout(r, 50));
       const JSZip = await loadJSZip();
       const zip = new JSZip();
       const fmt = OUTPUT_FORMATS.find((f) => f.id === output.format);
@@ -583,24 +616,13 @@ export default function BatchPhotoEditor() {
             ) : (
               <div className="grid grid-cols-3 gap-2 max-h-[60vh] overflow-y-auto pr-1">
                 {images.map((img) => (
-                  <div
+                  <GalleryThumb
                     key={img.id}
-                    onClick={() => setSelectedId(img.id)}
-                    className={`relative group aspect-square rounded-lg overflow-hidden cursor-pointer border-2 transition ${
-                      selectedId === img.id ? "border-emerald-400" : "border-transparent hover:border-slate-600"
-                    }`}
-                  >
-                    <img src={img.url} alt={img.name} className="w-full h-full object-cover" />
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeImage(img.id);
-                      }}
-                      className="absolute top-1 right-1 w-5 h-5 rounded-full bg-slate-950/80 grid place-items-center opacity-0 group-hover:opacity-100 transition hover:bg-red-500"
-                    >
-                      <X size={11} />
-                    </button>
-                  </div>
+                    img={img}
+                    isSelected={selectedId === img.id}
+                    onSelect={handleSelectImage}
+                    onRemove={removeImage}
+                  />
                 ))}
               </div>
             )}
