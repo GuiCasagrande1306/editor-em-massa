@@ -33,7 +33,8 @@ import {
   Building2,
   Mountain,
 } from "lucide-react";
-import { PRESETS, getCanvasFilterString } from "./presets";
+import { PRESETS } from "./presets";
+import { targetSize, paint } from "./renderShared";
 import { fetchPresets, savePreset, deletePreset } from "./presetsStore";
 
 /**
@@ -140,75 +141,41 @@ function streamZip(zip, onChunk, onProgress) {
   });
 }
 
-// Desenha uma imagem num canvas aplicando settings, resize e marca d'água.
-// `target` permite reutilizar o MESMO canvas em toda a exportação em lote
-// (economia de RAM); sem ele, cria um canvas novo (usado no preview/single).
+// Desenha uma imagem num canvas (main thread) aplicando settings, resize e marca
+// d'água. `target` permite reutilizar o MESMO canvas (economia de RAM); sem ele,
+// cria um canvas novo (preview / download individual). A lógica de desenho é
+// compartilhada com o worker via ./renderShared.
 function renderToCanvas(img, settings, resize, watermark, target) {
-  let w = img.naturalWidth;
-  let h = img.naturalHeight;
-
-  const maxW = resize.enabled && resize.maxWidth ? Number(resize.maxWidth) : Infinity;
-  const maxH = resize.enabled && resize.maxHeight ? Number(resize.maxHeight) : Infinity;
-  if (maxW < Infinity || maxH < Infinity) {
-    const ratio = Math.min(maxW / w, maxH / h, 1);
-    w = Math.round(w * ratio);
-    h = Math.round(h * ratio);
-  }
-
+  const { w, h } = targetSize(img.naturalWidth, img.naturalHeight, resize);
   const canvas = target || document.createElement("canvas");
   // Reatribuir width/height também limpa o canvas reutilizado.
   canvas.width = w;
   canvas.height = h;
-  const ctx = canvas.getContext("2d");
-
-  ctx.filter = getCanvasFilterString(settings);
-  ctx.drawImage(img, 0, 0, w, h);
-  ctx.filter = "none";
-
-  if (watermark.enabled && watermark.text) {
-    const fontSize = Math.max(8, (watermark.size / 100) * Math.min(w, h) * 0.15);
-    ctx.font = `600 ${fontSize}px system-ui, sans-serif`;
-    ctx.fillStyle = watermark.color;
-    ctx.globalAlpha = watermark.opacity / 100;
-    ctx.textBaseline = "middle";
-    const pad = fontSize * 0.6;
-    const tw = ctx.measureText(watermark.text).width;
-    let x = pad;
-    let y = pad + fontSize / 2;
-    switch (watermark.position) {
-      case "top-left":
-        x = pad;
-        y = pad + fontSize / 2;
-        break;
-      case "top-right":
-        x = w - tw - pad;
-        y = pad + fontSize / 2;
-        break;
-      case "center":
-        x = (w - tw) / 2;
-        y = h / 2;
-        break;
-      case "bottom-left":
-        x = pad;
-        y = h - pad - fontSize / 2;
-        break;
-      case "bottom-right":
-        x = w - tw - pad;
-        y = h - pad - fontSize / 2;
-        break;
-      default:
-        break;
-    }
-    ctx.fillText(watermark.text, x, y);
-    ctx.globalAlpha = 1;
-  }
-
+  paint(canvas.getContext("2d"), img, w, h, settings, watermark);
   return canvas;
 }
 
 // Largura máx. do canvas de PRÉ-VISUALIZAÇÃO (só exibição). A exportação usa a
 // resolução nativa — isto evita redesenhar 5328×4000 a cada ajuste de slider.
 const PREVIEW_MAX_W = 1200;
+
+// O navegador suporta encoding off-thread? (Worker + OffscreenCanvas com filtro
+// + convertToBlob + createImageBitmap). Se sim, o export não bloqueia a UI.
+const SUPPORTS_WORKER_EXPORT = (() => {
+  try {
+    if (
+      typeof Worker === "undefined" ||
+      typeof OffscreenCanvas === "undefined" ||
+      typeof createImageBitmap !== "function"
+    )
+      return false;
+    const oc = new OffscreenCanvas(1, 1);
+    const ctx = oc.getContext("2d");
+    return typeof oc.convertToBlob === "function" && !!ctx && "filter" in ctx;
+  } catch {
+    return false;
+  }
+})();
 
 // Slider fora do componente: se ficasse inline, o React o trataria como um tipo
 // novo a cada render e REMONTARIA os 7 sliders a cada movimento (INP alto).
@@ -299,6 +266,51 @@ export default function BatchPhotoEditor() {
 
   const fileInputRef = useRef(null);
   const previewCanvasRef = useRef(null);
+
+  // ---- Web Worker de exportação (encoding off-thread com OffscreenCanvas) ----
+  const workerRef = useRef(null);
+  const workerReqId = useRef(0);
+  const workerPending = useRef(new Map());
+
+  const getExportWorker = useCallback(() => {
+    if (!workerRef.current) {
+      const w = new Worker(new URL("./exportWorker.js", import.meta.url), {
+        type: "module",
+      });
+      w.onmessage = (e) => {
+        const { id, blob, error } = e.data;
+        const p = workerPending.current.get(id);
+        if (!p) return;
+        workerPending.current.delete(id);
+        if (error) p.reject(new Error(error));
+        else p.resolve(blob);
+      };
+      w.onerror = (err) => {
+        workerPending.current.forEach((p) => p.reject(err));
+        workerPending.current.clear();
+      };
+      workerRef.current = w;
+    }
+    return workerRef.current;
+  }, []);
+
+  // Codifica uma imagem no worker; `transfer` move o ImageBitmap sem copiar.
+  const encodeInWorker = useCallback(
+    (payload, transfer) => {
+      const w = getExportWorker();
+      const id = ++workerReqId.current;
+      return new Promise((resolve, reject) => {
+        workerPending.current.set(id, { resolve, reject });
+        w.postMessage({ id, ...payload }, transfer);
+      });
+    },
+    [getExportWorker]
+  );
+
+  // Encerra o worker ao desmontar.
+  useEffect(() => {
+    return () => workerRef.current?.terminate();
+  }, []);
 
   const selectedImage = useMemo(
     () => images.find((i) => i.id === selectedId) || null,
@@ -453,37 +465,55 @@ export default function BatchPhotoEditor() {
       // Qualidade selecionada (100% => 1.0). PNG é lossless (ignora quality).
       const quality = fmt.supportsQuality ? output.quality / 100 : undefined;
 
-      // UM único canvas reutilizado por todas as imagens (economia de RAM).
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
+      // Caminho preferido: encoding no Web Worker (não bloqueia o main thread).
+      // Fallback: um único canvas reutilizado no main thread.
+      const useWorker = SUPPORTS_WORKER_EXPORT;
+      let canvas = null;
+      let ctx = null;
+      if (!useWorker) {
+        canvas = document.createElement("canvas");
+        ctx = canvas.getContext("2d");
+      }
 
       for (let i = 0; i < images.length; i++) {
         const image = images[i];
-        // Renderiza na resolução NATIVA (resize só entra se o usuário ativou).
-        renderToCanvas(image.imgEl, settings, resize, watermark, canvas);
-        // eslint-disable-next-line no-await-in-loop
-        let blob = await new Promise((resolve) =>
-          canvas.toBlob(resolve, output.format, quality)
-        );
         const base = image.name.replace(/\.[^.]+$/, "");
+        // Renderiza na resolução NATIVA (resize só entra se o usuário ativou).
+        let blob;
+        if (useWorker) {
+          // Decode off-thread e transfere o bitmap pro worker (zero-copy).
+          // eslint-disable-next-line no-await-in-loop
+          const bitmap = await createImageBitmap(image.imgEl);
+          // eslint-disable-next-line no-await-in-loop
+          blob = await encodeInWorker(
+            { bitmap, settings, resize, watermark, type: output.format, quality },
+            [bitmap]
+          );
+        } else {
+          renderToCanvas(image.imgEl, settings, resize, watermark, canvas);
+          // eslint-disable-next-line no-await-in-loop
+          blob = await new Promise((resolve) =>
+            canvas.toBlob(resolve, output.format, quality)
+          );
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
         zip.file(`${base}-editado.${fmt.ext}`, blob);
         blob = null; // solta a referência para o GC
-
-        // Limpa o canvas antes da próxima imagem.
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
 
         const done = i + 1;
         setProgress(Math.round((done / images.length) * RENDER_WEIGHT));
         setProgressPhase(`Aplicando filtros (${done}/${images.length})`);
-        // Respiro para o GC a cada 10 imagens (20ms); nas demais, só cede o
-        // thread (0ms) para o React repintar a barra.
+        // O caminho worker já cede o thread nos awaits de mensagem; mantemos um
+        // respiro pro GC a cada 10 imagens.
         // eslint-disable-next-line no-await-in-loop
         await new Promise((r) => setTimeout(r, done % 10 === 0 ? 20 : 0));
       }
 
-      // Encolhe o canvas para liberar o buffer da última imagem.
-      canvas.width = 0;
-      canvas.height = 0;
+      if (canvas) {
+        // Encolhe o canvas do fallback para liberar o buffer da última imagem.
+        canvas.width = 0;
+        canvas.height = 0;
+      }
 
       setProgressPhase("Montando ZIP…");
       const onProgress = (pct) =>
