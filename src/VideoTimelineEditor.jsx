@@ -52,6 +52,10 @@ export default function VideoTimelineEditor() {
   const [words, setWords] = useState([]); // {id,text,start,end}
   const [overlays, setOverlays] = useState([]); // {id,url,start,end,x,y,w}
   const [cuts, setCuts] = useState([]); // segmentos MANTIDOS {id,start,end}
+  const [silenceDb, setSilenceDb] = useState(-30); // limiar de silêncio
+  const [minSilence, setMinSilence] = useState(0.4); // duração mín. do silêncio (s)
+  const [cutBusy, setCutBusy] = useState(false);
+  const [cutMsg, setCutMsg] = useState("");
 
   const [style, setStyle] = useState({
     fontFamily: FONTS[0].id,
@@ -221,6 +225,65 @@ export default function VideoTimelineEditor() {
   const updateOverlay = (id, patch) =>
     setOverlays((prev) => prev.map((o) => (o.id === id ? { ...o, ...patch } : o)));
   const removeOverlay = (id) => setOverlays((prev) => prev.filter((o) => o.id !== id));
+
+  // Auto-cut: decodifica o áudio (WebAudio) e monta os segmentos MANTIDOS,
+  // removendo silêncios abaixo de `silenceDb` por mais de `minSilence`.
+  const detectSilences = async () => {
+    if (!video?.file) return;
+    setCutBusy(true);
+    setCutMsg("Analisando áudio…");
+    try {
+      const buf = await video.file.arrayBuffer();
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ac = new AC();
+      const audio = await ac.decodeAudioData(buf.slice(0));
+      ac.close();
+      const data = audio.getChannelData(0);
+      const sr = audio.sampleRate;
+      const win = Math.max(1, Math.floor(sr * 0.02)); // janelas de 20ms
+      const winDur = win / sr;
+      const thr = Math.pow(10, silenceDb / 20); // dBFS -> amplitude RMS
+      const loud = [];
+      for (let i = 0; i < data.length; i += win) {
+        let sum = 0;
+        const end = Math.min(i + win, data.length);
+        for (let j = i; j < end; j++) sum += data[j] * data[j];
+        loud.push(Math.sqrt(sum / (end - i)) >= thr);
+      }
+      // intervalos de silêncio contínuo >= minSilence
+      const silences = [];
+      let i = 0;
+      while (i < loud.length) {
+        if (!loud[i]) {
+          let j = i;
+          while (j < loud.length && !loud[j]) j++;
+          if ((j - i) * winDur >= minSilence) silences.push([i * winDur, j * winDur]);
+          i = j;
+        } else i++;
+      }
+      // mantidos = complemento, com 50ms de folga ao redor da fala
+      const pad = 0.05;
+      const dur = audio.duration;
+      const kept = [];
+      let cursor = 0;
+      for (const [s, e] of silences) {
+        const remStart = s + pad;
+        const remEnd = e - pad;
+        if (remEnd - remStart <= 0.05) continue;
+        if (remStart > cursor) kept.push({ id: uid(), start: +cursor.toFixed(3), end: +remStart.toFixed(3) });
+        cursor = remEnd;
+      }
+      if (cursor < dur) kept.push({ id: uid(), start: +cursor.toFixed(3), end: +dur.toFixed(3) });
+      const finalKept = kept.length ? kept : [{ id: uid(), start: 0, end: dur }];
+      setCuts(finalKept);
+      const keptDur = finalKept.reduce((a, c) => a + (c.end - c.start), 0);
+      setCutMsg(`${finalKept.length} trecho(s) · ${(dur - keptDur).toFixed(1)}s removidos`);
+    } catch (err) {
+      setCutMsg("Não consegui decodificar o áudio deste vídeo. " + (err?.message || ""));
+    } finally {
+      setCutBusy(false);
+    }
+  };
 
   const searchGifs = async () => {
     if (!gifQuery.trim()) return;
@@ -425,6 +488,44 @@ export default function VideoTimelineEditor() {
             <div className="flex items-center gap-2 text-xs text-slate-400 mb-2">
               <Layers size={14} className="text-emerald-400" /> Timeline
             </div>
+
+            {/* Auto-cut por silêncio (WebAudio) */}
+            <div className="flex flex-wrap items-center gap-3 mb-3 p-2 rounded-lg bg-slate-800/40 border border-slate-800">
+              <button
+                onClick={detectSilences}
+                disabled={cutBusy}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 text-xs font-semibold"
+              >
+                <Scissors size={13} /> {cutBusy ? "Analisando…" : "Auto-cut (silêncios)"}
+              </button>
+              <label className="flex items-center gap-1 text-[11px] text-slate-400">
+                Limiar
+                <input
+                  type="range"
+                  min={-60}
+                  max={-10}
+                  value={silenceDb}
+                  onChange={(e) => setSilenceDb(Number(e.target.value))}
+                  className="accent-emerald-500 w-20"
+                />
+                <span className="font-mono text-slate-300 w-10">{silenceDb}dB</span>
+              </label>
+              <label className="flex items-center gap-1 text-[11px] text-slate-400">
+                Mín.
+                <input
+                  type="range"
+                  min={0.1}
+                  max={2}
+                  step={0.1}
+                  value={minSilence}
+                  onChange={(e) => setMinSilence(Number(e.target.value))}
+                  className="accent-emerald-500 w-16"
+                />
+                <span className="font-mono text-slate-300 w-8">{minSilence}s</span>
+              </label>
+              {cutMsg && <span className="text-[11px] text-emerald-300">{cutMsg}</span>}
+            </div>
+
             {/* régua clicável (seek) */}
             <div
               className="relative h-5 rounded bg-slate-800/60 mb-1 cursor-pointer"
