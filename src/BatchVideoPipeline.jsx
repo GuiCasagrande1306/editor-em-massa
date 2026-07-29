@@ -31,6 +31,7 @@ const STATUS = {
   audio: { label: "Analisando áudio", icon: Loader2, cls: "text-sky-300 bg-sky-500/15", spin: true },
   cutting: { label: "Cortando silêncios", icon: Scissors, cls: "text-amber-300 bg-amber-500/15" },
   overlays: { label: "Legendas / GIFs", icon: Sticker, cls: "text-fuchsia-300 bg-fuchsia-500/15", spin: true },
+  rendering: { label: "Renderizando", icon: Loader2, cls: "text-sky-300 bg-sky-500/15", spin: true },
   done: { label: "Pronto", icon: CheckCircle2, cls: "text-emerald-300 bg-emerald-500/15" },
   error: { label: "Erro", icon: AlertTriangle, cls: "text-red-300 bg-red-500/15" },
 };
@@ -91,7 +92,12 @@ export default function BatchVideoPipeline() {
   });
   const [processing, setProcessing] = useState(false);
   const [showPayload, setShowPayload] = useState(false);
+  const [rendering, setRendering] = useState(false);
+  const [renderProgress, setRenderProgress] = useState(0);
+  const [renderMsg, setRenderMsg] = useState("");
   const fileInputRef = useRef(null);
+  const ffmpegRef = useRef(null);
+  const progCtx = useRef({ done: 0, total: 1 });
 
   const addFiles = (fileList) => {
     const files = Array.from(fileList).filter((f) => f.type.startsWith("video/"));
@@ -206,6 +212,137 @@ export default function BatchVideoPipeline() {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  };
+
+  // ------------------------------------ render real (FFmpeg WASM) + ZIP
+  // Carrega o core do FFmpeg (self-hosted em /ffmpeg) uma vez.
+  const loadFFmpeg = async () => {
+    if (ffmpegRef.current) return ffmpegRef.current;
+    setRenderMsg("Carregando motor FFmpeg (~32MB, só na 1ª vez)…");
+    const { FFmpeg } = await import("@ffmpeg/ffmpeg");
+    const { toBlobURL } = await import("@ffmpeg/util");
+    const ff = new FFmpeg();
+    ff.on("progress", ({ progress }) => {
+      const { done, total } = progCtx.current;
+      const p = Math.max(0, Math.min(1, progress || 0));
+      setRenderProgress(Math.round(((done + p) / total) * 100));
+    });
+    await ff.load({
+      coreURL: await toBlobURL("/ffmpeg/ffmpeg-core.js", "text/javascript"),
+      wasmURL: await toBlobURL("/ffmpeg/ffmpeg-core.wasm", "application/wasm"),
+    });
+    ffmpegRef.current = ff;
+    return ff;
+  };
+
+  // Monta os argumentos: aplica cortes (trim+concat dos trechos mantidos) e o
+  // filtro de cor. Se não houver cortes reais, só aplica cor / transcodifica.
+  const buildArgs = (inName, outName, cuts, colorFilter) => {
+    const segs = cuts && cuts.length ? cuts : null;
+    const needCut = segs && (segs.length > 1 || (segs[0] && segs[0].start > 0.05));
+    if (needCut) {
+      const parts = [];
+      let labels = "";
+      segs.forEach((s, i) => {
+        parts.push(`[0:v]trim=start=${s.start}:end=${s.end},setpts=PTS-STARTPTS[v${i}]`);
+        parts.push(`[0:a]atrim=start=${s.start}:end=${s.end},asetpts=PTS-STARTPTS[a${i}]`);
+        labels += `[v${i}][a${i}]`;
+      });
+      let fc = parts.join(";") + `;${labels}concat=n=${segs.length}:v=1:a=1[vc][ac]`;
+      let vlabel = "[vc]";
+      if (colorFilter) {
+        fc += `;[vc]${colorFilter}[vf]`;
+        vlabel = "[vf]";
+      }
+      return [
+        "-i", inName, "-filter_complex", fc, "-map", vlabel, "-map", "[ac]",
+        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-movflags", "+faststart", outName,
+      ];
+    }
+    if (colorFilter) {
+      return ["-i", inName, "-vf", colorFilter, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", outName];
+    }
+    return ["-i", inName, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", outName];
+  };
+
+  const renderAndDownload = async () => {
+    if (!videos.length || rendering || processing) return;
+    setRendering(true);
+    setRenderProgress(0);
+    try {
+      const ffmpeg = await loadFFmpeg();
+      const { fetchFile } = await import("@ffmpeg/util");
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      const colorFilter = COLOR_PRESETS[rules.colorPreset].ffmpeg;
+      const total = videos.length;
+      let done = 0;
+      let okCount = 0;
+
+      // reseta status
+      setVideos((prev) => prev.map((v) => ({ ...v, status: "waiting" })));
+
+      for (const v of videosRef.current) {
+        progCtx.current = { done, total };
+        setRenderMsg(`Renderizando vídeo ${done + 1}/${total} — ${v.name}`);
+        try {
+          // cortes (roda o auto-cut se ainda não tiver)
+          let cuts = v.cuts;
+          if (rules.autoCut && !cuts) {
+            setStatus(v.id, { status: "audio" });
+            // eslint-disable-next-line no-await-in-loop
+            const res = await detectKeptSegments(v.file, {
+              silenceDb: -30,
+              minSilence: rules.minSilence,
+            }).catch(() => null);
+            cuts = res?.cuts || null;
+            setStatus(v.id, { cuts, duration: res?.duration || 0 });
+          }
+          setStatus(v.id, { status: "rendering" });
+          const inName = "in.mp4";
+          const outName = "out.mp4";
+          // eslint-disable-next-line no-await-in-loop
+          await ffmpeg.writeFile(inName, await fetchFile(v.file));
+          // eslint-disable-next-line no-await-in-loop
+          await ffmpeg.exec(buildArgs(inName, outName, rules.autoCut ? cuts : null, colorFilter));
+          // eslint-disable-next-line no-await-in-loop
+          const data = await ffmpeg.readFile(outName);
+          const blob = new Blob([data.buffer], { type: "video/mp4" });
+          const base = v.name.replace(/\.[^.]+$/, "");
+          zip.file(`${base}-editado.mp4`, blob);
+          // eslint-disable-next-line no-await-in-loop
+          await ffmpeg.deleteFile(inName).catch(() => {});
+          // eslint-disable-next-line no-await-in-loop
+          await ffmpeg.deleteFile(outName).catch(() => {});
+          setStatus(v.id, { status: "done" });
+          okCount++;
+        } catch (err) {
+          setStatus(v.id, { status: "error", error: String(err?.message || err) });
+        }
+        done++;
+        setRenderProgress(Math.round((done / total) * 100));
+      }
+
+      if (!okCount) {
+        setRenderMsg("Nenhum vídeo renderizado (veja os cards com erro).");
+        return;
+      }
+
+      setRenderMsg("Compactando ZIP…");
+      const content = await zip.generateAsync({ type: "blob", compression: "STORE" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(content);
+      a.download = "videos_editados_em_lote.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+      setRenderMsg(`Concluído ✓ (${okCount}/${total} no ZIP)`);
+    } catch (err) {
+      setRenderMsg("Erro: " + (err?.message || err));
+    } finally {
+      setRendering(false);
+    }
   };
 
   // ------------------------------------------------------------- ui bits
@@ -416,36 +553,67 @@ export default function BatchVideoPipeline() {
             </div>
           </div>
 
-          {/* ações */}
+          {/* ação principal: render real + ZIP */}
           <button
-            onClick={runBatch}
-            disabled={!videos.length || processing}
-            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+            onClick={renderAndDownload}
+            disabled={!videos.length || rendering || processing}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-sm disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {processing ? (
+            {rendering ? (
               <>
-                <Loader2 size={16} className="animate-spin" /> Processando ({counts.done}/{counts.total})
+                <Loader2 size={16} className="animate-spin" /> Renderizando… {renderProgress}%
               </>
             ) : (
               <>
-                <Play size={16} /> Processar lote
+                <Download size={16} /> Renderizar e Baixar Todos (ZIP)
               </>
             )}
           </button>
-          <div className="grid grid-cols-2 gap-2">
+
+          {rendering && (
+            <div>
+              <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
+                <span className="truncate pr-2">{renderMsg}</span>
+                <span className="font-mono text-emerald-300">{renderProgress}%</span>
+              </div>
+              <div className="h-2 w-full rounded-full bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-teal-500 transition-[width] duration-200"
+                  style={{ width: `${renderProgress}%` }}
+                />
+              </div>
+            </div>
+          )}
+          {!rendering && renderMsg && <p className="text-[11px] text-emerald-300">{renderMsg}</p>}
+
+          <p className="text-[10px] text-slate-500 leading-relaxed">
+            O render aplica <b>cortes (auto-cut)</b> e o <b>preset de cor</b> em cada vídeo (FFmpeg no
+            navegador). Legendas/GIFs/SFX ficam na receita JSON (queimá-los precisa da transcrição por
+            vídeo — no backend ou como próximo passo).
+          </p>
+
+          {/* secundárias: análise + payload */}
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              onClick={runBatch}
+              disabled={!videos.length || processing || rendering}
+              className="flex items-center justify-center gap-1 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium disabled:opacity-40"
+            >
+              {processing ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />} Analisar
+            </button>
             <button
               onClick={() => setShowPayload(true)}
               disabled={!videos.length}
               className="py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium disabled:opacity-40"
             >
-              Ver Payload
+              Payload
             </button>
             <button
               onClick={downloadPayload}
               disabled={!videos.length}
-              className="flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium disabled:opacity-40"
+              className="flex items-center justify-center gap-1 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium disabled:opacity-40"
             >
-              <Download size={13} /> Baixar JSON
+              <Download size={12} /> JSON
             </button>
           </div>
         </aside>
